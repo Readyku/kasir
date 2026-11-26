@@ -340,8 +340,9 @@ window.addEventListener('online', () => sync());
 document.addEventListener('visibilitychange', () => { if (!document.hidden) sync(); });
 
 /* ---------------- mulai ---------------- */
-const fromHash = parseLink(location.hash);
-if (fromHash) {
+function handleHash() {
+  const fromHash = parseLink(location.hash);
+  if (!fromHash) return false;
   const same = S.conn && S.conn.u === fromHash.u && S.conn.k === fromHash.k;
   if (!same) {
     // Pindah ke toko lain: data toko lama tidak boleh ikut terkirim ke toko baru.
@@ -349,7 +350,10 @@ if (fromHash) {
     Object.assign(S, { conn: fromHash, demo: false, cfg: null, shift: null, q: [], trx: [], dev: null, lastErr: '', lastCfg: 0 });
   }
   history.replaceState(null, '', location.pathname); save();
+  return true;
 }
+handleHash();
+window.addEventListener('hashchange', () => { if (handleHash()) { view = 'kasir'; route(); } });
 function alertLater() { setTimeout(() => { const w = $('nWarn'); if (w) w.textContent = 'Perangkat ini sebelumnya tersambung ke toko lain. Pesanan lama yang belum terkirim tidak dipindahkan.'; }, 0); }
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 route();

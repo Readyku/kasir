@@ -57,7 +57,7 @@ async function call(opts) {
 }
 function applyCfg(c) {
   S.lastCfg = Date.now();
-  if (!S.cfg || S.cfg.ver !== c.ver) { const modeChanged = S.cfg && S.cfg.mode !== c.mode; S.cfg = c; renderMenu(); renderTop(); if (modeChanged) { S.shift = null; route(); } }
+  if (!S.cfg || S.cfg.ver !== c.ver) { const modeChanged = S.cfg && S.cfg.mode !== c.mode; S.cfg = c; renderMenu(); renderTop(); if (modeChanged) { S.trx.forEach(t => { if (!t.settled) t.settled = 'ganti-mode'; }); S.shift = null; route(); } }
 }
 async function sync(force) {
   if (!S.conn || S.demo || busy) return;
@@ -104,7 +104,7 @@ function route() {
   if (!S.dev) return show('name');
   if (!S.cfg) return show('name');
   if (S.cfg.mode === 'karyawan' && !S.shift) { renderLogin(); return show('login'); }
-  $('tabTutup').textContent = S.cfg.mode === 'karyawan' ? 'Tutup shift' : 'Rekap hari ini';
+  $('tabTutup').textContent = S.cfg.mode === 'karyawan' ? 'Tutup shift' : 'Tutup kasir';
   $('tutupH').textContent = $('tabTutup').textContent;
   $('demoBanner').hidden = !S.demo;
   renderMenu(); renderCart();
@@ -185,7 +185,7 @@ function saveOrder() {
   const t = { id: S.dev.code + '-' + pad(S.dev.seq, 4), tgl: today(), jam: hhmm(), dev: S.dev.name, kasir: S.shift ? S.shift.kasir : 'Owner', ot: otype, cust: $('cust').value.trim(),
     m: method, total: tot, bayar: method === 'TUNAI' ? num($('cash').value) : tot, items: cart.map(c => ({ k: c.k, n: c.n, h: c.h, add: c.add, lbl: c.lbl, note: c.note, q: c.q })), st: 'OK' };
   S.trx.push(Object.assign({ sync: false, shiftId: S.shift ? S.shift.id : null }, t));
-  const cut = Date.now() - 3 * 864e5; S.trx = S.trx.filter(x => !x.sync || new Date(x.tgl) >= cut);
+  pruneTrx();
   queue({ kind: 'trx', eid: t.id, t });
   cart = []; $('cash').value = ''; $('cust').value = ''; renderCart(); renderTop();
   const s = struk(t);
@@ -195,66 +195,55 @@ function saveOrder() {
 }
 
 /* ---------------- riwayat ---------------- */
+// Pesanan yang belum "ditutup" (seperti EDC sebelum settlement). Setelah tutup, daftar kembali kosong.
+const open_ = () => S.cfg.mode === 'karyawan'
+  ? (S.shift ? S.trx.filter(t => !t.settled && t.shiftId === S.shift.id) : [])
+  : S.trx.filter(t => !t.settled);
 function renderHist() {
-  const T = S.trx.filter(t => t.tgl === today()).slice().reverse();
-  $('hist').innerHTML = T.length ? `<table><thead><tr><th>No</th><th>Jam</th><th>Bayar</th><th class="r">Total</th><th>Kirim</th><th>Status</th></tr></thead><tbody>${T.map(t => `<tr class="${t.st === 'BATAL' ? 'batal' : ''}"><td>${esc(t.id)}</td><td>${t.jam}</td><td>${t.m}</td><td class="r">${rp(t.total)}</td><td>${S.demo ? '<span class="tag o">Contoh</span>' : t.sync ? '<span class="tag g">Terkirim</span>' : '<span class="tag o">Menunggu</span>'}</td><td>${t.st === 'BATAL' ? '<span class="tag r">BATAL</span>' : `<button data-x="${esc(t.id)}">Batalkan</button><span data-pinw="${esc(t.id)}" hidden><input inputmode="numeric" type="password" placeholder="PIN owner" aria-label="PIN owner" style="width:120px;margin:4px 0"><button data-y="${esc(t.id)}">OK</button></span>`}</td></tr>`).join('')}</tbody></table>` : '<p class="empty">Belum ada pesanan hari ini.</p>';
+  const T = open_().slice().reverse(), closedToday = S.trx.filter(t => t.settled && t.tgl === today()).length;
+  $('hist').innerHTML = (T.length ? `<table><thead><tr><th>No</th><th>Jam</th><th>Bayar</th><th class="r">Total</th><th>Kirim</th><th>Status</th></tr></thead><tbody>${T.map(t => `<tr class="${t.st === 'BATAL' ? 'batal' : ''}"><td>${esc(t.id)}</td><td>${t.tgl === today() ? '' : tglID(t.tgl) + ' '}${t.jam}</td><td>${t.m}</td><td class="r">${rp(t.total)}</td><td>${S.demo ? '<span class="tag o">Contoh</span>' : t.sync ? '<span class="tag g">Terkirim</span>' : '<span class="tag o">Menunggu</span>'}</td><td>${t.st === 'BATAL' ? '<span class="tag r">BATAL</span>' : `<button data-x="${esc(t.id)}">Batalkan</button><span data-pinw="${esc(t.id)}" hidden><input inputmode="numeric" type="password" placeholder="PIN owner" aria-label="PIN owner" style="width:120px;margin:4px 0"><button data-y="${esc(t.id)}">OK</button></span>`}</td></tr>`).join('')}</tbody></table>` : '<p class="empty">Belum ada pesanan sejak tutup terakhir.</p>')
+    + (closedToday ? `<p class="note" style="margin-top:8px">${closedToday} pesanan hari ini sudah ditutup dan tersimpan di Google Sheet.</p>` : '');
 }
 async function voidTrx(id, pin, inp) {
   if (!(await pinOk(pin, S.cfg.po))) { inp.value = ''; inp.placeholder = 'PIN salah'; return; }
-  const t = S.trx.find(x => x.id === id); if (!t || t.st === 'BATAL') return;
+  const t = S.trx.find(x => x.id === id); if (!t || t.st === 'BATAL' || t.settled) return;
   t.st = 'BATAL'; queue({ kind: 'void', eid: 'void:' + id, id }); renderHist(); renderTop();
 }
 
-/* ---------------- tutup shift / rekap ---------------- */
-function shiftTrx() {
-  return S.trx.filter(t => t.st === 'OK' && (S.cfg.mode === 'karyawan' ? t.shiftId === (S.shift && S.shift.id) : t.tgl === today()));
-}
+/* ---------------- tutup shift / rekap (settlement) ---------------- */
 function calc() {
-  const ok = shiftTrx(), by = m => ok.filter(t => t.m === m).reduce((a, t) => a + t.total, 0);
+  const ok = open_().filter(t => t.st === 'OK'), by = m => ok.filter(t => t.m === m).reduce((a, t) => a + t.total, 0);
   const modal = S.cfg.mode === 'karyawan' ? (S.shift ? S.shift.modal : 0) : num(($('modalIn') || {}).value);
   return { ok, tunai: by('TUNAI'), qris: by('QRIS'), tf: by('TRANSFER'), modal };
 }
 function renderSum() {
   const k = S.cfg.mode === 'karyawan';
-  if (!k && !$('modalIn')) document.querySelector('label[for=laci]').insertAdjacentHTML('beforebegin', '<label for="modalIn" class="note" style="display:block">Modal awal laci hari ini</label><input id="modalIn" inputmode="numeric" value="0" style="margin-bottom:8px">');
+  if (!k && !$('modalIn')) document.querySelector('label[for=laci]').insertAdjacentHTML('beforebegin', '<label for="modalIn" class="note" style="display:block">Modal awal laci</label><input id="modalIn" inputmode="numeric" value="0" style="margin-bottom:8px">');
   const c = calc();
   $('sum').innerHTML = [k ? ['Modal awal laci', c.modal] : null, ['Tunai', c.tunai], ['QRIS', c.qris], ['Transfer', c.tf], ['Seharusnya di laci', c.modal + c.tunai]].filter(Boolean)
-    .map(([a, b]) => `<div class="kv"><span>${a}</span><b>${rp(b)}</b></div>`).join('') + `<p class="note">${c.ok.length} pesanan sah${k && S.shift ? ' · kasir ' + esc(S.shift.kasir) + ' sejak ' + S.shift.buka : ''}</p>`;
+    .map(([a, b]) => `<div class="kv"><span>${a}</span><b>${rp(b)}</b></div>`).join('') + `<p class="note">${c.ok.length} pesanan sejak tutup terakhir${k && S.shift ? ' · kasir ' + esc(S.shift.kasir) + ' sejak ' + S.shift.buka : ''}</p>`;
   $('close').disabled = k && !S.shift;
 }
-let lastRekap = null;
 function closeShift() {
   const raw = $('laci').value.trim();
   if (!raw) { $('laciWarn').textContent = 'Hitung dan isi dulu uang di laci.'; return; }
   const c = calc(), laci = num(raw), sel = laci - (c.modal + c.tunai), k = S.cfg.mode === 'karyawan';
-  const s = { id: S.dev.code + '-S' + Date.now().toString(36), dev: S.dev.name, kasir: k ? S.shift.kasir : 'Owner', buka: k ? S.shift.buka : tglID(today()),
+  const first = c.ok.length ? c.ok[0] : null;
+  const s = { id: S.dev.code + '-S' + Date.now().toString(36), dev: S.dev.name, kasir: k ? S.shift.kasir : 'Owner', buka: k ? S.shift.buka : (first ? tglID(first.tgl) + ' ' + first.jam : tglID(today())),
     tutup: tglID(today()) + ' ' + hhmm(), modal: c.modal, tunai: c.tunai, qris: c.qris, tf: c.tf, laci, n: c.ok.length };
+  open_().forEach(t => { t.settled = s.id; });           // settlement: semua pesanan terbuka (termasuk batal) ditutup
   queue({ kind: 'shift', eid: s.id, s });
-  const txt = `${S.cfg.toko}\n${k ? 'Tutup shift ' + s.kasir : 'Rekap hari ini'} · ${s.tutup}\nPesanan: ${s.n}\nOmzet: ${rp(c.tunai + c.qris + c.tf)}\nTunai ${rp(c.tunai)} · QRIS ${rp(c.qris)} · Transfer ${rp(c.tf)}\nUang di laci: ${rp(laci)} (selisih ${sel > 0 ? '+' : sel < 0 ? '−' : ''}${rp(Math.abs(sel))})\nBelum terkirim ke Sheet: ${S.q.filter(ev => ev.kind === 'trx').length} pesanan`;
-  lastRekap = { s, txt, rows: c.ok };
+  const wait = S.q.filter(ev => ev.kind === 'trx').length;
+  const txt = `${S.cfg.toko}\n${k ? 'Tutup shift ' + s.kasir : 'Tutup kasir'} · ${s.tutup}\nPesanan: ${s.n}\nOmzet: ${rp(c.tunai + c.qris + c.tf)}\nTunai ${rp(c.tunai)} · QRIS ${rp(c.qris)} · Transfer ${rp(c.tf)}\nUang di laci: ${rp(laci)} (selisih ${sel > 0 ? '+' : sel < 0 ? '−' : ''}${rp(Math.abs(sel))})` + (wait ? `\nBelum terkirim ke Sheet: ${wait} pesanan` : '');
   const wa = S.cfg.wa ? `https://wa.me/${S.cfg.wa}?text=${encodeURIComponent(txt)}` : `https://wa.me/?text=${encodeURIComponent(txt)}`;
-  $('rekapOut').innerHTML = `<div class="receipt" id="rkTxt"></div><a class="btn" target="_blank" rel="noopener" href="${wa}">Kirim ringkasan ke WA owner</a><button class="wide" id="shareX">Bagikan file rekap (.xlsx)</button><p class="warn" id="shareMsg"></p>`;
+  $('rekapOut').innerHTML = `<div class="receipt" id="rkTxt"></div><a class="btn" target="_blank" rel="noopener" href="${wa}">Kirim ringkasan ke WA owner</a><p class="note">${S.demo ? 'Mode contoh: rekap tidak dikirim ke mana pun.' : 'Rincian setiap pesanan sudah tercatat di Google Sheet (sheet Transaksi, Item, Shift).'}</p>`;
   $('rkTxt').textContent = txt; $('laciWarn').textContent = ''; $('laci').value = '';
-  if (k) { S.shift = null; save(); $('tabs').hidden = true; renderTop(); $('rekapOut').insertAdjacentHTML('beforeend', '<button class="primary" id="toLogin">Selesai, ke layar masuk</button>'); }
-  renderSum();
+  if ($('modalIn')) $('modalIn').value = '0';
+  if (k) { S.shift = null; $('tabs').hidden = true; renderTop(); $('rekapOut').insertAdjacentHTML('beforeend', '<button class="primary" id="toLogin">Selesai, ke layar masuk</button>'); }
+  pruneTrx(); save(); renderSum();
 }
-function loadXlsx() {
-  return window.XLSX ? Promise.resolve() : new Promise((ok, no) => { const sc = document.createElement('script'); sc.src = 'vendor/xlsx.mini.min.js'; sc.onload = ok; sc.onerror = no; document.head.appendChild(sc); });
-}
-async function shareXlsx() {
-  if (!lastRekap) return;
-  try {
-    await loadXlsx();
-    const { s, rows } = lastRekap, X = window.XLSX, wb = X.utils.book_new();
-    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([['Rekap Kasir Readyku'], ['Toko', S.cfg.toko], ['Perangkat', s.dev], ['Kasir', s.kasir], ['Buka', s.buka], ['Tutup', s.tutup], ['Modal', s.modal], ['Tunai', s.tunai], ['QRIS', s.qris], ['Transfer', s.tf], ['Uang di laci', s.laci], ['Selisih', s.laci - s.modal - s.tunai], ['Jumlah pesanan', s.n]]), 'Ringkasan');
-    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([['ID', 'Tanggal', 'Jam', 'Kasir', 'Jenis', 'Pelanggan', 'Metode', 'Total']].concat(rows.map(t => [t.id, tglID(t.tgl), t.jam, t.kasir, t.ot, t.cust, t.m, t.total]))), 'Pesanan');
-    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([['ID', 'Menu', 'Pilihan', 'Catatan', 'Qty', 'Harga', 'Subtotal']].concat([].concat(...rows.map(t => t.items.map(c => [t.id, c.n, c.lbl.join(', '), c.note, c.q, c.h + c.add, lineTot(c)]))))), 'Item');
-    const name = ('Rekap_' + S.cfg.toko + '_' + s.tutup.replace(/[/: ]/g, '-') + '.xlsx').replace(/[^\w.-]+/g, '_');
-    const file = new File([X.write(wb, { type: 'array', bookType: 'xlsx' })], name, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], text: lastRekap.txt }); $('shareMsg').textContent = ''; }
-    else { const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; document.body.appendChild(a); a.click(); a.remove(); $('shareMsg').textContent = 'File tersimpan di unduhan. Kirim ke owner lewat WhatsApp.'; }
-  } catch (e) { if (e && e.name !== 'AbortError') $('shareMsg').textContent = 'Gagal membuat file. Ringkasan WA tetap bisa dikirim.'; }
-}
+// Simpan di perangkat hanya yang masih perlu: belum terkirim, belum ditutup, atau ditutup hari ini.
+function pruneTrx() { S.trx = S.trx.filter(t => !t.sync || !t.settled || t.tgl === today()); }
 
 /* ---------------- login, perangkat ---------------- */
 function renderLogin() { $('lgName').innerHTML = (S.cfg.kasir || []).map((k, i) => `<option value="${i}">${esc(k.n)}</option>`).join(''); }
@@ -302,7 +291,6 @@ document.addEventListener('click', e => {
   else if (d.o) { otype = d.o; document.querySelectorAll('#otype button').forEach(x => x.setAttribute('aria-pressed', x === b)); }
   else if (d.x) { b.hidden = true; const w = document.querySelector(`[data-pinw="${CSS.escape(d.x)}"]`); w.hidden = false; w.querySelector('input').focus(); }
   else if (d.y) { const w = document.querySelector(`[data-pinw="${CSS.escape(d.y)}"]`), inp = w.querySelector('input'); voidTrx(d.y, inp.value, inp); }
-  else if (b.id === 'shareX') shareXlsx();
   else if (b.id === 'toLogin') { view = 'kasir'; route(); }
 });
 document.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.dataset && e.target.dataset.note !== undefined) { e.preventDefault(); editNote(+e.target.dataset.note); } });
@@ -356,6 +344,8 @@ handleHash();
 window.addEventListener('hashchange', () => { if (handleHash()) { view = 'kasir'; route(); } });
 function alertLater() { setTimeout(() => { const w = $('nWarn'); if (w) w.textContent = 'Perangkat ini sebelumnya tersambung ke toko lain. Pesanan lama yang belum terkirim tidak dipindahkan.'; }, 0); }
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+// Minta browser tidak menghapus data kasir saat memori HP penuh.
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
 route();
 setInterval(() => sync(), 15000);
 setTimeout(() => sync(), 500);
